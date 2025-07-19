@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Remote Browser Viewer</title>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+
+            .container {
+                width: 100vw;
+                height: 100vh;
+                display: flex;
+                flex-direction: column;
+                background: white;
+                border-radius: 12px;
+                box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+                overflow: hidden;
+            }
+
+            .header {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 20px;
+                text-align: center;
+                position: relative;
+            }
+
+            .header h1 {
+                font-size: 24px;
+                font-weight: 600;
+                margin-bottom: 8px;
+            }
+
+            .header p {
+                opacity: 0.9;
+                font-size: 14px;
+            }
+
+            .status-indicator {
+                position: absolute;
+                top: 20px;
+                right: 20px;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                font-size: 12px;
+            }
+
+            .status-dot {
+                width: 8px;
+                height: 8px;
+                border-radius: 50%;
+                background: #4CAF50;
+                animation: pulse 2s infinite;
+            }
+
+            .status-dot.connecting {
+                background: #FF9800;
+            }
+
+            .status-dot.error {
+                background: #F44336;
+            }
+
+            @keyframes pulse {
+                0% {
+                    opacity: 1;
+                }
+
+                50% {
+                    opacity: 0.5;
+                }
+
+                100% {
+                    opacity: 1;
+                }
+            }
+
+            .loading-overlay {
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(255, 255, 255, 0.95);
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                z-index: 1000;
+                transition: opacity 0.3s ease;
+            }
+
+            .loading-overlay.hidden {
+                opacity: 0;
+                pointer-events: none;
+            }
+
+            .spinner {
+                width: 40px;
+                height: 40px;
+                border: 4px solid #f3f3f3;
+                border-top: 4px solid #667eea;
+                border-radius: 50%;
+                animation: spin 1s linear infinite;
+                margin-bottom: 20px;
+            }
+
+            @keyframes spin {
+                0% {
+                    transform: rotate(0deg);
+                }
+
+                100% {
+                    transform: rotate(360deg);
+                }
+            }
+
+            .loading-text {
+                font-size: 16px;
+                color: #333;
+                margin-bottom: 8px;
+            }
+
+            .loading-subtext {
+                font-size: 14px;
+                color: #666;
+                text-align: center;
+                max-width: 300px;
+            }
+
+            .iframe-container {
+                flex: 1;
+                position: relative;
+                background: #f5f5f5;
+            }
+
+            iframe {
+                width: 100%;
+                height: 100%;
+                border: none;
+                background: white;
+            }
+
+            .error-message {
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                text-align: center;
+                color: #666;
+                display: none;
+            }
+
+            .error-message.show {
+                display: block;
+            }
+
+            .retry-btn {
+                background: #667eea;
+                color: white;
+                border: none;
+                padding: 12px 24px;
+                border-radius: 6px;
+                cursor: pointer;
+                font-size: 14px;
+                margin-top: 16px;
+                transition: background 0.2s ease;
+            }
+
+            .retry-btn:hover {
+                background: #5a6fd8;
+            }
+
+            .debug-panel {
+                position: fixed;
+                bottom: 20px;
+                right: 20px;
+                background: rgba(0, 0, 0, 0.8);
+                color: white;
+                padding: 12px;
+                border-radius: 6px;
+                font-size: 12px;
+                font-family: monospace;
+                max-width: 300px;
+                display: none;
+            }
+
+            .debug-panel.show {
+                display: block;
+            }
+
+            .debug-toggle {
+                position: fixed;
+                bottom: 20px;
+                left: 20px;
+                background: rgba(0, 0, 0, 0.6);
+                color: white;
+                border: none;
+                padding: 8px 12px;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 12px;
+            }
+        </style>
+    </head>
+
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>Remote Browser Viewer</h1>
+                <p>View and interact with websites through our secure proxy</p>
+                <div class="status-indicator">
+                    <div class="status-dot" id="statusDot"></div>
+                    <span id="statusText">Connecting...</span>
+                </div>
+            </div>
+
+            <div class="iframe-container">
+                <div class="loading-overlay" id="loadingOverlay">
+                    <div class="spinner"></div>
+                    <div class="loading-text" id="loadingText">Connecting to proxy server...</div>
+                    <div class="loading-subtext" id="loadingSubtext">Please wait while we establish the connection</div>
+                </div>
+
+                <iframe id="remoteFrame" src="about:blank"></iframe>
+
+                <div class="error-message" id="errorMessage">
+                    <h3>Connection Error</h3>
+                    <p>Unable to connect to the proxy server. Please check if the server is running.</p>
+                    <button class="retry-btn" onclick="retryConnection()">Retry Connection</button>
+                </div>
+            </div>
+        </div>
+
+        <button class="debug-toggle" onclick="toggleDebug()">Toggle Debug</button>
+        <div class="debug-panel" id="debugPanel">
+            <div><strong>Debug Info:</strong></div>
+            <div id="debugContent"></div>
+        </div>
+
+        <script>
+            let ws = null;
+            let lastUrl = '';
+            let connectionAttempts = 0;
+            let maxRetries = 5;
+            let loadingTimeout = null;
+            let apiCallCount = 0;
+            let completedApiCalls = 0;
+            let debugMode = false;
+
+            // Debug functions
+            function toggleDebug() {
+                debugMode = !debugMode;
+                document.getElementById('debugPanel').classList.toggle('show', debugMode);
+                updateDebugInfo();
+            }
+
+            function updateDebugInfo() {
+                if (!debugMode) return;
+                const debugContent = document.getElementById('debugContent');
+                debugContent.innerHTML = `
+                <div>WebSocket: ${ws ? 'Connected' : 'Disconnected'}</div>
+                <div>Last URL: ${lastUrl || 'None'}</div>
+                <div>API Calls: ${completedApiCalls}/${apiCallCount}</div>
+                <div>Connection Attempts: ${connectionAttempts}</div>
+            `;
+            }
+
+            function log(message) {
+                console.log(`[Remote Browser] ${message}`);
+                updateDebugInfo();
+            }
+
+            // Status management
+            function updateStatus(status, text) {
+                const statusDot = document.getElementById('statusDot');
+                const statusText = document.getElementById('statusText');
+
+                statusDot.className = `status-dot ${status}`;
+                statusText.textContent = text;
+            }
+
+            // Loading management
+            function showLoading(text, subtext) {
+                document.getElementById('loadingText').textContent = text;
+                document.getElementById('loadingSubtext').textContent = subtext;
+                document.getElementById('loadingOverlay').classList.remove('hidden');
+                document.getElementById('errorMessage').classList.remove('show');
+            }
+
+            function hideLoading() {
+                document.getElementById('loadingOverlay').classList.add('hidden');
+            }
+
+            function showError() {
+                document.getElementById('errorMessage').classList.add('show');
+                hideLoading();
+            }
+
+            // WebSocket connection
+            function connectWebSocket() {
+                if (connectionAttempts >= maxRetries) {
+                    log('Max retry attempts reached');
+                    updateStatus('error', 'Connection Failed');
+                    showError();
+                    return;
+                }
+
+                connectionAttempts++;
+                log(`Attempting connection ${connectionAttempts}/${maxRetries}`);
+
+                updateStatus('connecting', 'Connecting...');
+                showLoading('Connecting to proxy server...', 'Establishing WebSocket connection');
+
+                try {
+                    ws = new WebSocket('ws://127.0.0.1:8000/ws');
+
+                    ws.onopen = function () {
+                        log('WebSocket connected successfully');
+                        updateStatus('connected', 'Connected');
+                        connectionAttempts = 0; // Reset on success
+                        showLoading('Waiting for URL...', 'Ready to receive website data');
+                    };
+
+                    ws.onmessage = function (event) {
+                        try {
+                            const data = JSON.parse(event.data);
+                            log(`Received message: ${data.type}`);
+
+                            if (data.type === 'load_url' && data.url && data.url !== lastUrl) {
+                                handleNewUrl(data.url);
+                            } else if (data.type === 'status') {
+                                updateStatus(data.status, data.message);
+                            }
+                        } catch (e) {
+                            log(`Error parsing message: ${e.message}`);
+                        }
+                    };
+
+                    ws.onclose = function () {
+                        log('WebSocket disconnected');
+                        updateStatus('error', 'Disconnected');
+
+                        if (connectionAttempts < maxRetries) {
+                            setTimeout(connectWebSocket, 2000);
+                        } else {
+                            showError();
+                        }
+                    };
+
+                    ws.onerror = function (error) {
+                        log(`WebSocket error: ${error}`);
+                        updateStatus('error', 'Connection Error');
+                    };
+
+                } catch (error) {
+                    log(`Connection error: ${error.message}`);
+                    updateStatus('error', 'Connection Failed');
+                    setTimeout(connectWebSocket, 2000);
+                }
+            }
+
+            function handleNewUrl(url) {
+                log(`Loading new URL: ${url}`);
+                lastUrl = url;
+
+                showLoading('Loading website...', 'Fetching content through proxy');
+
+                // Load the proxy URL
+                const iframe = document.getElementById('remoteFrame');
+                iframe.src = 'http://127.0.0.1:8000/proxy';
+
+                // Set up monitoring for when the iframe loads
+                iframe.onload = function () {
+                    log('Iframe loaded, waiting for content to stabilize');
+                    showLoading('Processing content...', 'Setting up API interception and waiting for completion');
+
+                    // Wait a bit for the content to load and API calls to start
+                    setTimeout(() => {
+                        startContentMonitoring();
+                    }, 2000);
+                };
+            }
+
+            function startContentMonitoring() {
+                log('Starting content monitoring');
+
+                // Monitor the iframe for API calls and content loading
+                const checkInterval = setInterval(() => {
+                    try {
+                        const iframe = document.getElementById('remoteFrame');
+                        const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+
+                        // Check if the page has loaded basic content
+                        if (iframeDoc.body && iframeDoc.body.children.length > 0) {
+                            log('Content detected, monitoring API calls');
+
+                            // Wait for API calls to complete (give it some time)
+                            setTimeout(() => {
+                                log('Content loading complete');
+                                hideLoading();
+                                clearInterval(checkInterval);
+                            }, 3000);
+                        }
+                    } catch (e) {
+                        // Cross-origin restrictions, but that's expected
+                        log('Cross-origin check (expected)');
+
+                        // If we can't access the iframe content, assume it's loaded after a reasonable time
+                        setTimeout(() => {
+                            log('Assuming content loaded (cross-origin)');
+                            hideLoading();
+                            clearInterval(checkInterval);
+                        }, 5000);
+                    }
+                }, 1000);
+            }
+
+            function retryConnection() {
+                log('Retrying connection');
+                connectionAttempts = 0;
+                connectWebSocket();
+            }
+
+            // Initialize
+            document.addEventListener('DOMContentLoaded', function () {
+                log('Initializing Remote Browser Viewer');
+                connectWebSocket();
+
+                // Set up periodic debug updates
+                setInterval(() => {
+                    if (debugMode) {
+                        updateDebugInfo();
+                    }
+                }, 1000);
+            });
+
+            // Handle page visibility changes
+            document.addEventListener('visibilitychange', function () {
+                if (document.hidden) {
+                    log('Page hidden');
+                } else {
+                    log('Page visible');
+                    if (!ws || ws.readyState !== WebSocket.OPEN) {
+                        log('Reconnecting due to page visibility');
+                        connectWebSocket();
+                    }
+                }
+            });
+        </script>
+    </body>
+
+</html>

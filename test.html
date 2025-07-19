@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+
+    <head>
+        <title>Test Page</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                padding: 20px;
+                background: linear-gradient(45deg, #ff6b6b, #4ecdc4);
+                color: white;
+            }
+
+            h1 {
+                text-align: center;
+            }
+
+            .content {
+                background: rgba(255, 255, 255, 0.2);
+                padding: 20px;
+                border-radius: 10px;
+                margin: 20px 0;
+            }
+        </style>
+    </head>
+
+    <body>
+        <h1>🎉 Iframe Test Successful! 🎉</h1>
+        <div class="content">
+            <h2>This page loaded successfully in an iframe!</h2>
+            <p>If you can see this, it means:</p>
+            <ul>
+                <li>✅ Your desktop app is working</li>
+                <li>✅ The FastAPI server is running</li>
+                <li>✅ The iframe communication is working</li>
+                <li>✅ This site allows iframe embedding</li>
+            </ul>
+            <p><strong>Current time:</strong> <span id="time"></span></p>
+        </div>
+        <script>
+            document.getElementById('time').textContent = new Date().toLocaleString();
+        </script>
+    </body>
+
+</html>
