@@ -1,8 +1,8 @@
-PyQt6==6.6.0
-PyQt6-WebEngine==6.6.0
-PyQt6-WebChannel==6.6.0
-requests==2.31.0
-fastapi==0.104.1
-uvicorn==0.24.0
-httpx==0.25.2
-aiofiles==23.2.1
+PyQt6>=6.4.0
+PyQt6-WebEngine>=6.4.0
+requests>=2.31.0
+fastapi>=0.104.1
+uvicorn>=0.24.0
+httpx>=0.25.2
+aiofiles>=23.2.1
+h2>=4.1.0

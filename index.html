@@ -223,8 +223,8 @@
     <body>
         <div class="container">
             <div class="header">
-                <h1>Remote Browser Viewer</h1>
-                <p>View and interact with websites through our secure proxy</p>
+                <h1>Desktop to Web Transfer</h1>
+                <p>View fully-loaded websites transferred from your desktop application</p>
                 <div class="status-indicator">
                     <div class="status-dot" id="statusDot"></div>
                     <span id="statusText">Connecting...</span>
@@ -242,7 +242,7 @@
 
                 <div class="error-message" id="errorMessage">
                     <h3>Connection Error</h3>
-                    <p>Unable to connect to the proxy server. Please check if the server is running.</p>
+                    <p>Unable to connect to the desktop application. Please check if the app is running.</p>
                     <button class="retry-btn" onclick="retryConnection()">Retry Connection</button>
                 </div>
             </div>
@@ -326,7 +326,7 @@
                 log(`Attempting connection ${connectionAttempts}/${maxRetries}`);
 
                 updateStatus('connecting', 'Connecting...');
-                showLoading('Connecting to proxy server...', 'Establishing WebSocket connection');
+                showLoading('Connecting to desktop app...', 'Establishing WebSocket connection');
 
                 try {
                     ws = new WebSocket('ws://127.0.0.1:8000/ws');
@@ -335,7 +335,7 @@
                         log('WebSocket connected successfully');
                         updateStatus('connected', 'Connected');
                         connectionAttempts = 0; // Reset on success
-                        showLoading('Waiting for URL...', 'Ready to receive website data');
+                        showLoading('Waiting for content...', 'Ready to receive website from desktop app');
                     };
 
                     ws.onmessage = function (event) {
@@ -343,8 +343,8 @@
                             const data = JSON.parse(event.data);
                             log(`Received message: ${data.type}`);
 
-                            if (data.type === 'load_url' && data.url && data.url !== lastUrl) {
-                                handleNewUrl(data.url);
+                            if (data.type === 'content_received') {
+                                handleContentReceived(data);
                             } else if (data.type === 'status') {
                                 updateStatus(data.status, data.message);
                             }
@@ -376,61 +376,51 @@
                 }
             }
 
-            function handleNewUrl(url) {
-                log(`Loading new URL: ${url}`);
-                lastUrl = url;
+            function handleContentReceived(data) {
+                log(`Content received from desktop app: ${data.url}`);
+                lastUrl = data.url;
 
-                showLoading('Loading website...', 'Fetching content through proxy');
+                showLoading('Loading captured content...', 'Displaying website from desktop application');
 
-                // Load the proxy URL
-                const iframe = document.getElementById('remoteFrame');
-                iframe.src = 'http://127.0.0.1:8000/proxy';
-
-                // Set up monitoring for when the iframe loads
-                iframe.onload = function () {
-                    log('Iframe loaded, waiting for content to stabilize');
-                    showLoading('Processing content...', 'Setting up API interception and waiting for completion');
-
-                    // Wait a bit for the content to load and API calls to start
-                    setTimeout(() => {
-                        startContentMonitoring();
-                    }, 2000);
-                };
+                // Load the captured content
+                loadCapturedContent();
             }
 
-            function startContentMonitoring() {
-                log('Starting content monitoring');
+            function loadCapturedContent() {
+                log('Fetching captured content from server...');
 
-                // Monitor the iframe for API calls and content loading
-                const checkInterval = setInterval(() => {
-                    try {
-                        const iframe = document.getElementById('remoteFrame');
-                        const iframeDoc = iframe.contentDocument || iframe.contentWindow.document;
+                fetch('/get_content')
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.status === 'success') {
+                            log('Content loaded successfully');
 
-                        // Check if the page has loaded basic content
-                        if (iframeDoc.body && iframeDoc.body.children.length > 0) {
-                            log('Content detected, monitoring API calls');
+                            // Create a blob URL for the HTML content
+                            const blob = new Blob([data.html], { type: 'text/html' });
+                            const blobUrl = URL.createObjectURL(blob);
 
-                            // Wait for API calls to complete (give it some time)
+                            // Load the content in the iframe
+                            const iframe = document.getElementById('remoteFrame');
+                            iframe.src = blobUrl;
+
+                            // Hide loading after a short delay
                             setTimeout(() => {
-                                log('Content loading complete');
                                 hideLoading();
-                                clearInterval(checkInterval);
-                            }, 3000);
-                        }
-                    } catch (e) {
-                        // Cross-origin restrictions, but that's expected
-                        log('Cross-origin check (expected)');
+                                log('Website displayed successfully!');
+                            }, 1000);
 
-                        // If we can't access the iframe content, assume it's loaded after a reasonable time
-                        setTimeout(() => {
-                            log('Assuming content loaded (cross-origin)');
-                            hideLoading();
-                            clearInterval(checkInterval);
-                        }, 5000);
-                    }
-                }, 1000);
+                        } else {
+                            log('Error loading content: ' + data.message);
+                            showError();
+                        }
+                    })
+                    .catch(error => {
+                        log('Error fetching content: ' + error.message);
+                        showError();
+                    });
             }
+
+
 
             function retryConnection() {
                 log('Retrying connection');

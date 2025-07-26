@@ -14,7 +14,12 @@ from PyQt6.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QLi
 from PyQt6.QtCore import QUrl, pyqtSlot, QObject, Qt
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEnginePage
-from PyQt6.QtWebChannel import QWebChannel
+
+try:
+    from PyQt6.QtWebChannel import QWebChannel
+except ImportError:
+    # For older PyQt6 versions, QWebChannel might be in a different location
+    QWebChannel = None
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
@@ -75,11 +80,13 @@ class RobustWebBrowser(QMainWindow):
         self.url_input.setPlaceholderText("Enter URL (e.g., https://zulushare.com)")
         self.url_input.returnPressed.connect(self.load_url)
         
-        load_btn = QPushButton("Load")
+        load_btn = QPushButton("Load Website")
         load_btn.clicked.connect(self.load_url)
         
-        self.proxy_btn = QPushButton("Load via Proxy")
-        self.proxy_btn.clicked.connect(self.load_via_proxy)
+        self.move_to_web_btn = QPushButton("Move to Web")
+        self.move_to_web_btn.clicked.connect(self.move_to_web)
+        self.move_to_web_btn.setEnabled(False)  # Disabled until page loads
+        self.move_to_web_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
         
         self.select_btn = QPushButton("Enable Selection")
         self.select_btn.setCheckable(True)
@@ -90,7 +97,7 @@ class RobustWebBrowser(QMainWindow):
         
         url_layout.addWidget(self.url_input)
         url_layout.addWidget(load_btn)
-        url_layout.addWidget(self.proxy_btn)
+        url_layout.addWidget(self.move_to_web_btn)
         url_layout.addWidget(self.select_btn)
         url_layout.addWidget(clear_btn)
         
@@ -104,11 +111,14 @@ class RobustWebBrowser(QMainWindow):
         self.custom_page = CustomWebEnginePage(self)
         self.web_view.setPage(self.custom_page)
         
-        # Setup WebChannel
-        self.channel = QWebChannel()
-        self.bridge = ProxyBridge(self)
-        self.channel.registerObject('bridge', self.bridge)
-        self.web_view.page().setWebChannel(self.channel)
+        # Setup WebChannel (if available)
+        if QWebChannel:
+            self.channel = QWebChannel()
+            self.bridge = ProxyBridge(self)
+            self.channel.registerObject('bridge', self.bridge)
+            self.web_view.page().setWebChannel(self.channel)
+        else:
+            print("Warning: QWebChannel not available, element selection may not work")
         
         splitter.addWidget(self.web_view)
         
@@ -137,8 +147,67 @@ class RobustWebBrowser(QMainWindow):
             url = 'https://' + url
         
         self.current_url = url
-        self.log_message(f"Loading URL directly: {url}")
+        self.move_to_web_btn.setEnabled(False)  # Disable while loading
+        self.log_message(f"Loading website: {url}")
+        
+        # Connect to loadFinished signal to enable "Move to Web" button
+        self.web_view.loadFinished.connect(self.on_load_finished)
         self.web_view.load(QUrl(url))
+        
+    def on_load_finished(self, ok):
+        """Called when the webpage finishes loading"""
+        if ok:
+            self.move_to_web_btn.setEnabled(True)
+            self.log_message(f"✅ Website loaded successfully! You can now 'Move to Web'")
+        else:
+            self.log_message(f"❌ Failed to load website")
+        
+        # Disconnect the signal to avoid multiple connections
+        try:
+            self.web_view.loadFinished.disconnect(self.on_load_finished)
+        except:
+            pass
+    
+    def move_to_web(self):
+        """Capture the current webpage content and send it to the web interface"""
+        if not self.current_url:
+            self.log_message("❌ No URL loaded yet")
+            return
+        
+        self.log_message("📋 Capturing webpage content...")
+        
+        # Get the HTML content from the web view
+        self.web_view.page().toHtml(self.on_html_captured)
+    
+    def on_html_captured(self, html):
+        """Called when HTML content is captured from the web view"""
+        self.log_message(f"✅ Captured {len(html)} characters of HTML content")
+        
+        # Send to web interface via API
+        try:
+            import requests
+            
+            # Prepare the data to send
+            data = {
+                'type': 'rendered_content',
+                'url': self.current_url,
+                'html': html,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            # Send to web interface
+            response = requests.post('http://127.0.0.1:8000/receive_content', 
+                                   json=data, 
+                                   timeout=10)
+            
+            if response.status_code == 200:
+                self.log_message("✅ Content sent to web interface successfully!")
+                self.log_message("🌐 View at: http://127.0.0.1:8000")
+            else:
+                self.log_message(f"❌ Failed to send content: {response.text}")
+                
+        except Exception as e:
+            self.log_message(f"❌ Error sending content: {e}")
         
     def load_via_proxy(self):
         url = self.url_input.text().strip()
@@ -330,6 +399,13 @@ proxy_state = {
     'cache': {}
 }
 
+# Store the latest captured content
+captured_content = {
+    'html': '',
+    'url': '',
+    'timestamp': ''
+}
+
 class ProxyCache:
     def __init__(self, ttl_seconds=300):  # 5 minutes default TTL
         self.cache = {}
@@ -366,7 +442,9 @@ async def startup_event():
     proxy_state['client'] = httpx.AsyncClient(
         timeout=httpx.Timeout(30.0),
         follow_redirects=True,
-        limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)
+        limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+        http2=True,  # Enable HTTP/2 support
+        verify=False  # Disable SSL verification for problematic sites
     )
 
 @app.on_event("shutdown")
@@ -415,6 +493,56 @@ async def set_target_url(request: Request):
         "message": f"Target URL set to {target_url}"
     })
 
+@app.post("/receive_content")
+async def receive_content(request: Request):
+    """Receive captured content from desktop application"""
+    try:
+        data = await request.json()
+        
+        # Store the captured content
+        captured_content['html'] = data.get('html', '')
+        captured_content['url'] = data.get('url', '')
+        captured_content['timestamp'] = data.get('timestamp', '')
+        
+        print(f"📋 Received content from desktop app:")
+        print(f"   URL: {captured_content['url']}")
+        print(f"   Size: {len(captured_content['html'])} characters")
+        
+        # Broadcast to all connected WebSocket clients
+        await broadcast_to_websockets({
+            'type': 'content_received',
+            'url': captured_content['url'],
+            'timestamp': captured_content['timestamp']
+        })
+        
+        return JSONResponse({
+            "status": "success",
+            "message": f"Content received successfully ({len(captured_content['html'])} chars)"
+        })
+        
+    except Exception as e:
+        print(f"❌ Error receiving content: {e}")
+        return JSONResponse({
+            "status": "error",
+            "message": f"Failed to receive content: {str(e)}"
+        }, status_code=500)
+
+@app.get("/get_content")
+async def get_content():
+    """Get the latest captured content"""
+    if not captured_content['html']:
+        return JSONResponse({
+            "status": "error",
+            "message": "No content available"
+        }, status_code=404)
+    
+    return JSONResponse({
+        "status": "success",
+        "html": captured_content['html'],
+        "url": captured_content['url'],
+        "timestamp": captured_content['timestamp']
+    })
+
 @app.get("/", response_class=HTMLResponse)
 async def get_index():
     """Serve the main web interface"""
@@ -427,6 +555,17 @@ async def get_index():
 
 @app.get("/proxy", response_class=HTMLResponse)
 async def get_proxy_page():
+    if not proxy_state['target_url']:
+        return HTMLResponse(
+            "<h1>Error</h1><p>No target URL set. Use POST /set_target first.</p>",
+            status_code=400
+        )
+    
+    return await proxy_request(proxy_state['target_url'], "GET")
+
+@app.get("/site", response_class=HTMLResponse)
+async def get_clean_proxy_page():
+    """Clean proxy route without /proxy path for complex sites"""
     if not proxy_state['target_url']:
         return HTMLResponse(
             "<h1>Error</h1><p>No target URL set. Use POST /set_target first.</p>",
@@ -448,6 +587,140 @@ async def proxy_path(path: str, request: Request):
         target_url = f"{base_url}/{path.lstrip('/')}"
     
     return await proxy_request_with_details(target_url, request)
+
+@app.api_route("/site/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
+async def clean_proxy_path(path: str, request: Request):
+    """Clean proxy path handler for complex sites like Airbnb"""
+    if not proxy_state['target_url']:
+        raise HTTPException(status_code=400, detail="No target URL set")
+    
+    # Handle different path types
+    if path.startswith('http'):
+        target_url = unquote(path)
+    else:
+        base_url = proxy_state['target_url'].rstrip('/')
+        target_url = f"{base_url}/{path.lstrip('/')}"
+    
+    # Special handling for Airbnb API calls
+    if 'airbnb.com/api' in target_url:
+        return await handle_airbnb_api(target_url, request)
+    
+    return await proxy_request_with_details(target_url, request)
+
+async def handle_airbnb_api(url: str, request: Request):
+    """Special handler for Airbnb API calls that require HTTP/2"""
+    
+    # Handle CORS preflight requests
+    if request.method == "OPTIONS":
+        return Response(
+            content="",
+            status_code=200,
+            headers={
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS, PATCH',
+                'Access-Control-Allow-Headers': '*',
+                'Access-Control-Max-Age': '86400',
+            }
+        )
+    
+    try:
+        # Get request body
+        body = None
+        if request.method in ["POST", "PUT", "PATCH"]:
+            body = await request.body()
+        
+        # Prepare headers with more specific Airbnb requirements
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Cache-Control': 'no-cache',
+            'DNT': '1',
+            'Pragma': 'no-cache',
+            'Priority': 'u=1, i',
+            'Sec-Ch-UA': '"Google Chrome";v="130", "Chromium";v="130", "Not.A/Brand";v="99"',
+            'Sec-Ch-UA-Mobile': '?0',
+            'Sec-Ch-UA-Platform': '"macOS"',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+        }
+        
+        # Only add Content-Type for POST/PUT/PATCH requests with body
+        if request.method in ["POST", "PUT", "PATCH"] and body:
+            headers['Content-Type'] = 'application/json'
+        
+        # Forward specific headers from the original request
+        for header_name in ['authorization', 'x-csrf-token', 'cookie']:
+            if header_name in request.headers:
+                headers[header_name] = request.headers[header_name]
+        
+        client = proxy_state['client']
+        
+        print(f"🎯 Airbnb API Call: {request.method} {url}")
+        print(f"📋 Request Headers: {dict(headers)}")
+        if body:
+            print(f"📄 Request Body: {body[:200]}..." if len(body) > 200 else f"📄 Request Body: {body}")
+        
+        response = await client.request(
+            method=request.method,
+            url=url,
+            headers=headers,
+            content=body,
+            params=dict(request.query_params),
+            timeout=10.0
+        )
+        
+        # Handle the response
+        content_type = response.headers.get('content-type', 'application/json')
+        
+        response_headers = {
+            'Content-Type': content_type,
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS, PATCH',
+            'Access-Control-Allow-Headers': '*',
+            'Access-Control-Allow-Credentials': 'true',
+        }
+        
+        # Forward important response headers
+        for header in ['set-cookie', 'x-csrf-token', 'etag', 'cache-control']:
+            if header in response.headers:
+                response_headers[header] = response.headers[header]
+        
+        if response.status_code >= 400:
+            print(f"❌ Airbnb API Error: {response.status_code}")
+            print(f"📄 Response Body: {response.text[:500]}..." if len(response.text) > 500 else f"📄 Response Body: {response.text}")
+        else:
+            print(f"✅ Airbnb API Success: {response.status_code}")
+        
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            headers=response_headers,
+            media_type=content_type
+        )
+        
+    except Exception as e:
+        print(f"❌ Airbnb API Error: {str(e)}")
+        
+        # Return a fallback JSON response for failed API calls
+        fallback_response = {
+            "error": "API_UNAVAILABLE",
+            "message": "Service temporarily unavailable",
+            "fallback": True
+        }
+        
+        return JSONResponse(
+            content=fallback_response,
+            status_code=200,  # Return 200 to prevent client-side errors
+            headers={
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS, PATCH',
+                'Access-Control-Allow-Headers': '*',
+            }
+        )
 
 async def proxy_request(url: str, method: str, headers: dict = None, body: bytes = None, params: dict = None):
     """Simple proxy request for basic usage"""
@@ -549,9 +822,16 @@ async def proxy_request_with_details(url: str, request: Request):
         # Set proper headers (avoid compression to prevent decoding issues)
         headers.update({
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': '*/*',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'identity',  # Request uncompressed content
+            'Accept-Encoding': 'gzip, deflate, br',  # Allow compression for better compatibility
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'Upgrade-Insecure-Requests': '1',
             'Referer': proxy_state['target_url'],
         })
         
@@ -559,7 +839,9 @@ async def proxy_request_with_details(url: str, request: Request):
         problematic_domains = [
             'google-analytics.com', 'googlesyndication.com', 'doubleclick.net',
             'adtrafficquality.google', 'googletagmanager.com', 'googleadservices.com',
-            'carsandbids.com'  # Add this domain that's causing 403 errors
+            'carsandbids.com',  # Add this domain that's causing 403 errors
+            'tracking', 'analytics', 'metrics', 'telemetry',  # Block tracking-related paths
+            'jitney/logging', 'marketing_event_tracking'  # Block Airbnb tracking specifically
         ]
         
         is_problematic = any(domain in url for domain in problematic_domains)
@@ -690,49 +972,102 @@ def process_html_content(html: str, base_url: str) -> str:
     const originalFetch = window.fetch;
     const originalXHROpen = XMLHttpRequest.prototype.open;
     
-    // Override fetch
+    // Override fetch with improved handling for complex sites
     window.fetch = function(input, init = {}) {
         let url = typeof input === 'string' ? input : input.url;
         
         if (url.startsWith('http') && !url.startsWith(window.location.origin)) {
-            const proxyUrl = window.location.origin + '/proxy/' + encodeURIComponent(url);
+            // Use /site/ path for cleaner routing
+            const proxyUrl = window.location.origin + '/site/' + encodeURIComponent(url);
             console.log('🌐 Proxying fetch:', url, '->', proxyUrl);
             
+            // Enhanced headers for complex sites
+            const enhancedInit = {
+                ...init,
+                headers: {
+                    ...init.headers,
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Accept': 'application/json, text/plain, */*'
+                }
+            };
+            
+            // Handle duplex for streaming body (modern fetch API requirement)
+            if (init.body && (init.method === 'POST' || init.method === 'PUT' || init.method === 'PATCH')) {
+                enhancedInit.duplex = 'half';
+            }
+            
             if (typeof input === 'string') {
-                return originalFetch(proxyUrl, init).catch(error => {
+                return originalFetch(proxyUrl, enhancedInit).catch(error => {
                     console.log('🌐 Fetch proxy error:', error);
-                    // Return a fallback response for failed requests
-                    return new Response(JSON.stringify({
-                        error: 'Proxy request failed',
-                        message: error.message
-                    }), {
-                        status: 500,
-                        headers: { 'Content-Type': 'application/json' }
+                    // Try fallback with /proxy/ path
+                    const fallbackUrl = window.location.origin + '/proxy/' + encodeURIComponent(url);
+                    const fallbackInit = { ...init };
+                    if (fallbackInit.body && (fallbackInit.method === 'POST' || fallbackInit.method === 'PUT' || fallbackInit.method === 'PATCH')) {
+                        fallbackInit.duplex = 'half';
+                    }
+                    return originalFetch(fallbackUrl, fallbackInit).catch(fallbackError => {
+                        console.log('🌐 Fallback proxy error:', fallbackError);
+                        return new Response(JSON.stringify({
+                            error: 'Proxy request failed',
+                            message: error.message
+                        }), {
+                            status: 500,
+                            headers: { 'Content-Type': 'application/json' }
+                        });
                     });
                 });
             } else {
-                const newRequest = new Request(proxyUrl, input);
-                return originalFetch(newRequest, init).catch(error => {
-                    console.log('🌐 Fetch proxy error:', error);
-                    // Return a fallback response for failed requests
-                    return new Response(JSON.stringify({
-                        error: 'Proxy request failed',
-                        message: error.message
-                    }), {
-                        status: 500,
-                        headers: { 'Content-Type': 'application/json' }
+                // Create new request with duplex support
+                const requestInit = { ...input };
+                if (requestInit.body && (requestInit.method === 'POST' || requestInit.method === 'PUT' || requestInit.method === 'PATCH')) {
+                    requestInit.duplex = 'half';
+                }
+                
+                try {
+                    const newRequest = new Request(proxyUrl, requestInit);
+                    return originalFetch(newRequest, enhancedInit).catch(error => {
+                        console.log('🌐 Fetch proxy error:', error);
+                        // Try fallback with /proxy/ path
+                        const fallbackRequestInit = { ...input };
+                        if (fallbackRequestInit.body && (fallbackRequestInit.method === 'POST' || fallbackRequestInit.method === 'PUT' || fallbackRequestInit.method === 'PATCH')) {
+                            fallbackRequestInit.duplex = 'half';
+                        }
+                        const fallbackRequest = new Request(window.location.origin + '/proxy/' + encodeURIComponent(url), fallbackRequestInit);
+                        return originalFetch(fallbackRequest, init).catch(fallbackError => {
+                            console.log('🌐 Fallback proxy error:', fallbackError);
+                            return new Response(JSON.stringify({
+                                error: 'Proxy request failed',
+                                message: error.message
+                            }), {
+                                status: 500,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        });
                     });
-                });
+                } catch (requestError) {
+                    console.log('🌐 Request creation error:', requestError);
+                    // Fallback to simple string-based request
+                    const fallbackInit = { 
+                        method: input.method || 'GET',
+                        headers: input.headers || {},
+                        body: input.body || null
+                    };
+                    if (fallbackInit.body && (fallbackInit.method === 'POST' || fallbackInit.method === 'PUT' || fallbackInit.method === 'PATCH')) {
+                        fallbackInit.duplex = 'half';
+                    }
+                    return originalFetch(proxyUrl, fallbackInit);
+                }
             }
         }
         
         return originalFetch(input, init);
     };
     
-    // Override XMLHttpRequest
+    // Override XMLHttpRequest with improved handling
     XMLHttpRequest.prototype.open = function(method, url, ...args) {
         if (typeof url === 'string' && url.startsWith('http') && !url.startsWith(window.location.origin)) {
-            const proxyUrl = window.location.origin + '/proxy/' + encodeURIComponent(url);
+            // Use /site/ path for cleaner routing
+            const proxyUrl = window.location.origin + '/site/' + encodeURIComponent(url);
             console.log('🌐 Proxying XHR:', url, '->', proxyUrl);
             return originalXHROpen.call(this, method, proxyUrl, ...args);
         }
@@ -776,6 +1111,23 @@ def process_html_content(html: str, base_url: str) -> str:
             return Promise.resolve();
         };
     }
+    
+    // Handle Airbnv's internal routing errors
+    window.addEventListener('error', function(e) {
+        if (e.message && e.message.includes('HyperloopNotFoundError')) {
+            console.log('🛑 Blocked Airbnb internal routing error:', e.message);
+            e.preventDefault();
+            return false;
+        }
+    });
+    
+    window.addEventListener('unhandledrejection', function(e) {
+        if (e.reason && (e.reason.message || '').includes('HyperloopNotFoundError')) {
+            console.log('🛑 Blocked Airbnb internal promise rejection:', e.reason.message || e.reason);
+            e.preventDefault();
+            return false;
+        }
+    });
     
     // Override history API to prevent errors
     const originalPushState = history.pushState;
